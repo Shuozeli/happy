@@ -1,0 +1,21 @@
+{
+  "name": "@slopus/conductor",
+  "version": "0.1.0",
+  "description": "Voice-first session orchestrator built on Happy",
+  "type": "module",
+  "scripts": {
+    "start": "tsx src/index.ts",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "axios": "^1.13.2",
+    "socket.io-client": "^4.8.1",
+    "tweetnacl": "^1.0.3",
+    "zod": "^4.0.0"
+  },
+  "devDependencies": {
+    "@types/node": ">=20",
+    "tsx": "^4.20.6",
+    "typescript": "5.9.3"
+  }
+}
