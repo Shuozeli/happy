@@ -7,6 +7,7 @@ import {
     getRandomBytes,
     libsodiumEncryptForPublicKey,
     decrypt,
+    decryptBoxBundle,
 } from './crypto.js';
 import type { Credentials, RawSession, SessionMetadata } from './types.js';
 
@@ -35,7 +36,7 @@ export class HappyClient {
         };
     }
 
-    async getOrCreateSession(tag: string, metadata: SessionMetadata): Promise<Session> {
+    async getOrCreateSession(tag: string, metadata: SessionMetadata, contentSecretKey?: Uint8Array): Promise<Session> {
         let encryptionKey: Uint8Array;
         let encryptionVariant: 'legacy' | 'dataKey';
         let dataEncryptionKey: string | null = null;
@@ -53,7 +54,7 @@ export class HappyClient {
             encryptionVariant = 'legacy';
         }
 
-        const response = await axios.post<{ session: { id: string; seq: number; metadata: string; metadataVersion: number; agentState: string | null; agentStateVersion: number } }>(
+        const response = await axios.post<{ session: { id: string; seq: number; metadata: string; metadataVersion: number; agentState: string | null; agentStateVersion: number; dataEncryptionKey?: string } }>(
             `${this.serverUrl}/v1/sessions`,
             {
                 tag,
@@ -65,6 +66,18 @@ export class HappyClient {
         );
 
         const raw = response.data.session;
+
+        // If the server returned the session's stored dataEncryptionKey (for an existing session),
+        // try to unwrap the original session key using the content key pair from agent.key.
+        // This allows decryption of pre-existing messages after a state file loss.
+        if (raw.dataEncryptionKey && contentSecretKey && encryptionVariant === 'dataKey') {
+            const bundle = decodeBase64(raw.dataEncryptionKey);
+            const unwrapped = decryptBoxBundle(bundle.slice(1), contentSecretKey);
+            if (unwrapped) {
+                encryptionKey = unwrapped;
+            }
+        }
+
         return {
             id: raw.id,
             seq: raw.seq,

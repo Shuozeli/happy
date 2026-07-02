@@ -6,10 +6,13 @@ import {
     readServerUrl,
     readConductorState,
     writeConductorState,
+    saveConductorSessionToSharedStore,
     readDaemonHttpPort,
     getPaths,
+    readAgentSecret,
 } from './config.js';
-import { getRandomBytes, encodeBase64, decodeBase64 } from './crypto.js';
+import { randomUUID } from 'node:crypto';
+import { getRandomBytes, encodeBase64, decodeBase64, deriveContentKeyPair } from './crypto.js';
 import { HappyClient } from './HappyClient.js';
 import { ConductorSession } from './ConductorSession.js';
 import { SessionMonitor } from './SessionMonitor.js';
@@ -30,6 +33,8 @@ async function main(): Promise<void> {
     const serverUrl = readServerUrl();
     const machineId = readMachineId() ?? 'default';
     const paths = getPaths();
+    const agentSecret = readAgentSecret();
+    const contentSecretKey = agentSecret ? deriveContentKeyPair(agentSecret).secretKey : undefined;
 
     const client = new HappyClient(serverUrl, credentials);
     const monitor = new SessionMonitor(client);
@@ -41,6 +46,22 @@ async function main(): Promise<void> {
     let encryptionKey: Uint8Array;
     let encryptionVariant: 'legacy' | 'dataKey';
     let lastSeq: number;
+    let sessionMetadata: SessionMetadata | undefined;
+    let sessionMetadataVersion: number | undefined;
+
+    const conductorMetadata: SessionMetadata = {
+        path: homedir(),
+        host: hostname(),
+        flavor: 'conductor',
+        name: 'Conductor',
+        summary: { text: 'Conductor', updatedAt: Date.now() },
+        homeDir: homedir(),
+        happyHomeDir: paths.home,
+        happyLibDir: '',
+        happyToolsDir: '',
+        lifecycleState: 'running',
+        machineId,
+    };
 
     const existingState = readConductorState();
     if (existingState) {
@@ -49,31 +70,30 @@ async function main(): Promise<void> {
         encryptionKey = decodeBase64(existingState.encryptionKey);
         encryptionVariant = existingState.encryptionVariant;
         lastSeq = existingState.seq;
+        sessionMetadata = conductorMetadata;
     } else {
-        console.log('[Conductor] Creating new session...');
-        const tag = `conductor-v1-${machineId}`;
-        const metadata: SessionMetadata = {
-            path: homedir(),
-            host: hostname(),
-            flavor: 'conductor',
-            name: 'Conductor',
-            homeDir: homedir(),
-            happyHomeDir: paths.home,
-            happyLibDir: '',
-            happyToolsDir: '',
-            lifecycleState: 'running',
-        };
-        const session = await client.getOrCreateSession(tag, metadata);
+        // Use a unique tag so we always create a FRESH session when state is missing.
+        // Reusing an old session tag without the original key causes dataEncryptionKey/metadata
+        // mismatch — the server keeps the old wrapped key but we encrypt metadata with a new one.
+        const tag = `conductor-v1-${machineId}-${randomUUID()}`;
+        console.log(`[Conductor] Creating new session (tag=${tag})...`);
+        const session = await client.getOrCreateSession(tag, conductorMetadata, contentSecretKey);
         sessionId = session.id;
         encryptionKey = session.encryptionKey;
         encryptionVariant = session.encryptionVariant;
+        sessionMetadata = conductorMetadata;
+        sessionMetadataVersion = session.metadataVersion;
         lastSeq = session.seq;
-        writeConductorState({
+
+        const state: import('./types.js').ConductorState = {
             sessionId,
+            sessionTag: tag,
             encryptionKey: encodeBase64(encryptionKey),
             encryptionVariant,
             seq: lastSeq,
-        });
+        };
+        writeConductorState(state);
+        saveConductorSessionToSharedStore(sessionId, state, conductorMetadata);
         console.log(`[Conductor] Session created: ${sessionId}`);
     }
 
@@ -192,6 +212,8 @@ async function main(): Promise<void> {
         client,
         lastSeq,
         handleUserMessage,
+        sessionMetadata,
+        sessionMetadataVersion,
     );
 
     conductorSession.connect();

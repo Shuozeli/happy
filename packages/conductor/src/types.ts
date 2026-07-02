@@ -9,6 +9,7 @@ export type Credentials = {
 
 export type ConductorState = {
     sessionId: string;
+    sessionTag: string;
     encryptionKey: string; // base64
     encryptionVariant: EncryptionVariant;
     seq: number;

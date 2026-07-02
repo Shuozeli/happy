@@ -2,7 +2,7 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { decodeBase64 } from './crypto.js';
-import type { Credentials, ConductorState, PersistedSession } from './types.js';
+import type { Credentials, ConductorState, PersistedSession, SessionMetadata } from './types.js';
 
 function happyHomeDir(): string {
     const env = process.env.HAPPY_HOME_DIR;
@@ -112,6 +112,29 @@ export function writeConductorState(state: ConductorState): void {
     const paths = getPaths();
     if (!existsSync(paths.home)) mkdirSync(paths.home, { recursive: true });
     writeFileSync(paths.conductorState, JSON.stringify(state, null, 2), 'utf8');
+}
+
+// Saves the conductor session key into sessions.json alongside other CLI sessions.
+// This allows key recovery if conductor.state.json is ever lost.
+export function saveConductorSessionToSharedStore(sessionId: string, state: ConductorState, metadata: PersistedSession['metadata']): void {
+    const paths = getPaths();
+    try {
+        let data: { sessions: Record<string, PersistedSession> } = { sessions: {} };
+        if (existsSync(paths.sessions)) {
+            try { data = JSON.parse(readFileSync(paths.sessions, 'utf8')); } catch { /* ignore */ }
+        }
+        if (!data.sessions) data.sessions = {};
+        data.sessions[sessionId] = {
+            encryptionKey: state.encryptionKey,
+            encryptionVariant: state.encryptionVariant,
+            seq: state.seq,
+            metadataVersion: 0,
+            agentStateVersion: 0,
+            metadata,
+            savedAt: Date.now(),
+        };
+        writeFileSync(paths.sessions, JSON.stringify(data, null, 2), 'utf8');
+    } catch { /* ignore — non-fatal */ }
 }
 
 export function readDaemonHttpPort(): number | null {

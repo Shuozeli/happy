@@ -1,7 +1,7 @@
 import { io, Socket } from 'socket.io-client';
-import { decodeBase64, decrypt } from './crypto.js';
+import { decodeBase64, decrypt, encodeBase64, encrypt } from './crypto.js';
 import { HappyClient } from './HappyClient.js';
-import type { UserMessage } from './types.js';
+import type { SessionMetadata, UserMessage } from './types.js';
 
 type ServerToClientEvents = {
     update: (data: { body: { t: string; sid?: string; message?: { seq: number; content: { t: string; c: string } } } }) => void;
@@ -11,6 +11,7 @@ type ServerToClientEvents = {
 
 type ClientToServerEvents = {
     'session-alive': (data: { sid: string; time: number; thinking: boolean; mode: string }) => void;
+    'update-metadata': (data: { sid: string; expectedVersion: number; metadata: string }, cb: (res: unknown) => void) => void;
 };
 
 export class ConductorSession {
@@ -27,6 +28,8 @@ export class ConductorSession {
         private readonly client: HappyClient,
         private lastSeq: number,
         private readonly onUserMessage: (text: string) => Promise<void>,
+        private readonly metadata?: SessionMetadata,
+        private metadataVersion?: number,
     ) {}
 
     connect(): void {
@@ -50,6 +53,7 @@ export class ConductorSession {
                 this.reconnectTimer = null;
             }
             this.startKeepAlive();
+            this.pushMetadata().catch(() => {});
             // Fetch any messages missed while disconnected
             this.pollMessages().catch(() => {});
         });
@@ -64,7 +68,8 @@ export class ConductorSession {
                 return;
             }
             this.lastSeq = seq;
-            this.handleRawDecrypted(decrypt(this.encryptionKey, this.encryptionVariant, decodeBase64(msg.content.c)));
+            const decoded = decrypt(this.encryptionKey, this.encryptionVariant, decodeBase64(msg.content.c));
+            if (decoded !== null) this.handleRawDecrypted(decoded);
         });
 
         this.socket.on('disconnect', () => {
@@ -101,7 +106,9 @@ export class ConductorSession {
                 if (msg.seq <= this.lastSeq) continue;
                 if (msg.content?.t !== 'encrypted') continue;
                 this.lastSeq = msg.seq;
-                this.handleRawDecrypted(decrypt(this.encryptionKey, this.encryptionVariant, decodeBase64(msg.content.c)));
+                const decoded = decrypt(this.encryptionKey, this.encryptionVariant, decodeBase64(msg.content.c));
+                if (decoded === null) continue; // old messages from before key rotation — skip
+                this.handleRawDecrypted(decoded);
             }
         } catch (err) {
             console.error('[Conductor] Poll error:', err);
@@ -119,6 +126,24 @@ export class ConductorSession {
             meta: { sentFrom: 'cli' },
         };
         await this.client.sendMessages(this.sessionId, this.encryptionKey, this.encryptionVariant, [message]);
+    }
+
+    private async pushMetadata(): Promise<void> {
+        if (!this.metadata || !this.socket) return;
+        const updated: SessionMetadata = {
+            ...this.metadata,
+            summary: { text: 'Conductor', updatedAt: Date.now() },
+        };
+        const encoded = encodeBase64(encrypt(this.encryptionKey, this.encryptionVariant, updated));
+        this.socket.emit('update-metadata', { sid: this.sessionId, expectedVersion: this.metadataVersion ?? 0, metadata: encoded }, (res: unknown) => {
+            const r = res as Record<string, unknown> | null;
+            if (r && typeof r === 'object' && 'version' in r && typeof r.version === 'number') {
+                this.metadataVersion = r.version;
+                console.log(`[Conductor] Metadata pushed, version=${r.version}`);
+            } else {
+                console.warn('[Conductor] pushMetadata unexpected response:', JSON.stringify(res));
+            }
+        });
     }
 
     private startKeepAlive(): void {
