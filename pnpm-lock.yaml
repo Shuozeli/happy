@@ -343,6 +343,9 @@ importers:
       axios:
         specifier: ^1.13.2
         version: 1.13.4
+      better-sqlite3:
+        specifier: ^12.9.0
+        version: 12.9.0
       socket.io-client:
         specifier: ^4.8.1
         version: 4.8.3
@@ -353,6 +356,9 @@ importers:
         specifier: ^4.0.0
         version: 4.4.3
     devDependencies:
+      '@types/better-sqlite3':
+        specifier: ^7.6.13
+        version: 7.6.13
       '@types/node':
         specifier: '>=20'
         version: 20.19.39

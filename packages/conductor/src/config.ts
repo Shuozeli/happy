@@ -20,6 +20,7 @@ export function getPaths() {
         sessions: join(home, 'sessions.json'),
         daemonState: join(home, 'daemon.state.json'),
         conductorState: join(home, 'conductor.state.json'),
+        conductorDb: join(home, 'conductor.db'),
         logs: join(home, 'logs'),
     };
 }

@@ -1,25 +1,23 @@
 import { hostname, homedir } from 'node:os';
-import { join } from 'node:path';
+import { randomUUID } from 'node:crypto';
 import {
     readCredentials,
     readMachineId,
     readServerUrl,
     readConductorState,
-    writeConductorState,
-    saveConductorSessionToSharedStore,
-    readDaemonHttpPort,
     getPaths,
     readAgentSecret,
+    saveConductorSessionToSharedStore,
 } from './config.js';
-import { randomUUID } from 'node:crypto';
-import { getRandomBytes, encodeBase64, decodeBase64, deriveContentKeyPair } from './crypto.js';
+import { encodeBase64, decodeBase64, deriveContentKeyPair } from './crypto.js';
 import { HappyClient } from './HappyClient.js';
 import { ConductorSession } from './ConductorSession.js';
-import { SessionMonitor } from './SessionMonitor.js';
-import { SessionSummarizer } from './SessionSummarizer.js';
-import { InterruptController } from './InterruptController.js';
-import { parseIntent } from './CommandRouter.js';
+import { Database } from './db/Database.js';
+import { createActions } from './actions/index.js';
+import { LLMTranslator } from './LLMTranslator.js';
 import type { SessionMetadata } from './types.js';
+
+// ── Startup ──────────────────────────────────────────────────────────────────
 
 async function main(): Promise<void> {
     console.log('[Conductor] Starting...');
@@ -33,21 +31,90 @@ async function main(): Promise<void> {
     const serverUrl = readServerUrl();
     const machineId = readMachineId() ?? 'default';
     const paths = getPaths();
-    const agentSecret = readAgentSecret();
-    const contentSecretKey = agentSecret ? deriveContentKeyPair(agentSecret).secretKey : undefined;
 
+    const db = new Database(paths.conductorDb);
     const client = new HappyClient(serverUrl, credentials);
-    const monitor = new SessionMonitor(client);
-    const summarizer = new SessionSummarizer(client);
-    const interruptor = new InterruptController(client);
+    const actions = createActions(db, client);
+    const llm = new LLMTranslator(client);
 
-    // Establish Conductor session — create fresh each start so key is stable
+    // ── Identity: load from DB, migrate from old state file, or create fresh ──
+
     let sessionId: string;
     let encryptionKey: Uint8Array;
     let encryptionVariant: 'legacy' | 'dataKey';
     let lastSeq: number;
-    let sessionMetadata: SessionMetadata | undefined;
-    let sessionMetadataVersion: number | undefined;
+    let metadataVersion: number | undefined;
+
+    const identity = db.getConductorIdentity();
+
+    if (identity) {
+        console.log(`[Conductor] Resuming session ${identity.session_id}`);
+        sessionId = identity.session_id;
+        encryptionKey = decodeBase64(identity.encryption_key);
+        encryptionVariant = identity.encryption_variant as 'legacy' | 'dataKey';
+        lastSeq = identity.seq;
+        metadataVersion = identity.metadata_version;
+    } else {
+        // Attempt one-time migration from the legacy conductor.state.json
+        const legacyState = readConductorState();
+
+        if (legacyState) {
+            console.log(`[Conductor] Migrating from conductor.state.json → conductor.db`);
+            sessionId = legacyState.sessionId;
+            encryptionKey = decodeBase64(legacyState.encryptionKey);
+            encryptionVariant = legacyState.encryptionVariant;
+            lastSeq = legacyState.seq;
+        } else {
+            const agentSecret = readAgentSecret();
+            const contentSecretKey = agentSecret ? deriveContentKeyPair(agentSecret).secretKey : undefined;
+            const tag = `conductor-v1-${machineId}-${randomUUID()}`;
+
+            console.log(`[Conductor] Creating new session (tag=${tag})...`);
+
+            const conductorMetadata: SessionMetadata = {
+                path: homedir(),
+                host: hostname(),
+                flavor: 'conductor',
+                name: 'Conductor',
+                summary: { text: 'Conductor', updatedAt: Date.now() },
+                homeDir: homedir(),
+                happyHomeDir: paths.home,
+                happyLibDir: '',
+                happyToolsDir: '',
+                lifecycleState: 'running',
+                machineId,
+            };
+
+            const session = await client.getOrCreateSession(tag, conductorMetadata, contentSecretKey);
+            sessionId = session.id;
+            encryptionKey = session.encryptionKey;
+            encryptionVariant = session.encryptionVariant;
+            lastSeq = session.seq;
+            metadataVersion = session.metadataVersion;
+
+            // Also write to sessions.json so happy-cli can see the conductor session
+            saveConductorSessionToSharedStore(
+                sessionId,
+                { sessionId, sessionTag: tag, encryptionKey: encodeBase64(encryptionKey), encryptionVariant, seq: lastSeq },
+                conductorMetadata,
+            );
+
+            console.log(`[Conductor] Session created: ${sessionId}`);
+        }
+
+        const migratedTag = legacyState?.sessionTag ?? `conductor-v1-${machineId}-migrated`;
+        db.upsertConductorIdentity({
+            session_id: sessionId,
+            session_tag: migratedTag,
+            encryption_key: encodeBase64(encryptionKey),
+            encryption_variant: encryptionVariant,
+            seq: lastSeq,
+            metadata_version: metadataVersion ?? 0,
+            updated_at: Date.now(),
+        });
+    }
+
+    // ── Conductor metadata (pushed on every connect) ─────────────────────────
 
     const conductorMetadata: SessionMetadata = {
         path: homedir(),
@@ -63,145 +130,83 @@ async function main(): Promise<void> {
         machineId,
     };
 
-    const existingState = readConductorState();
-    if (existingState) {
-        console.log(`[Conductor] Resuming session ${existingState.sessionId}`);
-        sessionId = existingState.sessionId;
-        encryptionKey = decodeBase64(existingState.encryptionKey);
-        encryptionVariant = existingState.encryptionVariant;
-        lastSeq = existingState.seq;
-        sessionMetadata = conductorMetadata;
-    } else {
-        // Use a unique tag so we always create a FRESH session when state is missing.
-        // Reusing an old session tag without the original key causes dataEncryptionKey/metadata
-        // mismatch — the server keeps the old wrapped key but we encrypt metadata with a new one.
-        const tag = `conductor-v1-${machineId}-${randomUUID()}`;
-        console.log(`[Conductor] Creating new session (tag=${tag})...`);
-        const session = await client.getOrCreateSession(tag, conductorMetadata, contentSecretKey);
-        sessionId = session.id;
-        encryptionKey = session.encryptionKey;
-        encryptionVariant = session.encryptionVariant;
-        sessionMetadata = conductorMetadata;
-        sessionMetadataVersion = session.metadataVersion;
-        lastSeq = session.seq;
+    // ── Message handler ───────────────────────────────────────────────────────
 
-        const state: import('./types.js').ConductorState = {
-            sessionId,
-            sessionTag: tag,
-            encryptionKey: encodeBase64(encryptionKey),
-            encryptionVariant,
-            seq: lastSeq,
-        };
-        writeConductorState(state);
-        saveConductorSessionToSharedStore(sessionId, state, conductorMetadata);
-        console.log(`[Conductor] Session created: ${sessionId}`);
-    }
-
-    const handleUserMessage = async (text: string): Promise<void> => {
+    const handleUserMessage = async (text: string, seq: number): Promise<void> => {
         console.log(`[Conductor] Received: "${text}"`);
-        const intent = parseIntent(text);
-        console.log(`[Conductor] Intent: ${intent.type}`);
 
-        let response: string;
-
-        switch (intent.type) {
-            case 'list-sessions': {
-                const sessions = await monitor.listActive();
-                response = monitor.formatSessionList(sessions);
-                break;
-            }
-
-            case 'summarize-all': {
-                const sessions = await monitor.listActive();
-                if (sessions.length === 0) {
-                    response = 'You have no active coding sessions right now.';
-                } else if (sessions.length === 1) {
-                    response = await summarizer.summarize(sessions[0]);
-                } else {
-                    const summaries = await Promise.all(
-                        sessions.map(async (s, i) => {
-                            const summary = await summarizer.summarize(s);
-                            const dir = s.directory.replace(process.env.HOME ?? '/root', '~');
-                            return `Session ${i + 1} in ${dir}: ${summary}`;
-                        }),
-                    );
-                    response = summaries.join(' ');
-                }
-                break;
-            }
-
-            case 'summarize-one': {
-                const sessions = await monitor.listActive();
-                const idx = intent.sessionRef - 1;
-                if (idx < 0 || idx >= sessions.length) {
-                    response = `I don't see a session number ${intent.sessionRef}. You have ${sessions.length} active session${sessions.length === 1 ? '' : 's'}.`;
-                } else {
-                    response = await summarizer.summarize(sessions[idx]);
-                }
-                break;
-            }
-
-            case 'send-message':
-            case 'interrupt': {
-                const sessions = await monitor.listActive();
-                const idx = intent.sessionRef - 1;
-                if (idx < 0 || idx >= sessions.length) {
-                    response = `I don't see a session number ${intent.sessionRef}.`;
-                } else {
-                    const target = sessions[idx];
-                    const msg = intent.type === 'send-message' ? intent.message : intent.message;
-                    await interruptor.sendMessage(target, msg);
-                    const dir = target.directory.replace(process.env.HOME ?? '/root', '~');
-                    response = `Done. I sent the message to session ${intent.sessionRef} in ${dir}.`;
-                }
-                break;
-            }
-
-            case 'find-and-summarize':
-            case 'find-and-interrupt':
-            case 'find-and-send': {
-                const sessions = await monitor.listActive();
-                const match = monitor.findByQuery(sessions, intent.query);
-                if (!match) {
-                    response = `I couldn't find an active session matching "${intent.query}". Try saying "list my sessions" to see what's running.`;
-                } else {
-                    const dir = match.directory.replace(process.env.HOME ?? '/root', '~');
-                    if (intent.type === 'find-and-summarize') {
-                        const summary = await summarizer.summarize(match);
-                        response = `Found a session in ${dir}. ${summary}`;
-                    } else {
-                        const msg = intent.type === 'find-and-send' ? intent.message : intent.message;
-                        await interruptor.sendMessage(match, msg);
-                        response = `Found the session in ${dir} and sent your message.`;
-                    }
-                }
-                break;
-            }
-
-            case 'spawn-session': {
-                const port = readDaemonHttpPort();
-                if (!port) {
-                    response = 'The Happy daemon is not running. Start it with "happy claude" first.';
-                } else {
-                    await client.spawnSessionViaDaemon(intent.directory, port);
-                    response = `Started a new session in ${intent.directory}.`;
-                }
-                break;
-            }
-
-            case 'help': {
-                response = 'You can say: list my sessions, summarize session 1, what is session 2 doing, tell session 1 to stop, or start a new session in a directory.';
-                break;
-            }
-
-            default: {
-                response = 'I didn\'t understand that. Try saying "list my sessions", "summarize session 1", or "tell session 1 to stop".';
-            }
+        // Always refresh the session registry so the LLM sees current state
+        try {
+            await actions.fetchSessions();
+        } catch (err) {
+            console.warn('[Conductor] fetchSessions failed (continuing with cached state):', err);
         }
 
-        console.log(`[Conductor] Responding: "${response.slice(0, 100)}${response.length > 100 ? '...' : ''}"`);
-        await conductorSession.sendAgentMessage(response);
+        const sessions = db.getAllActiveSessions();
+        const history = db.getRecentConversation(10);
+        const plan = await llm.translate(text, sessions, history);
+
+        console.log(`[Conductor] Plan: action=${plan.action} session=${plan.session_id ?? 'none'}`);
+
+        let reply = plan.reply;
+
+        try {
+            switch (plan.action) {
+                case 'fetch_sessions':
+                    // Already done above; just confirm
+                    break;
+
+                case 'send_to_session':
+                    if (plan.session_id && plan.params?.message) {
+                        await actions.sendToSession(plan.session_id, String(plan.params.message));
+                    }
+                    break;
+
+                case 'interrupt':
+                    if (plan.session_id) await actions.interrupt(plan.session_id);
+                    break;
+
+                case 'grant_access':
+                    if (plan.session_id && plan.params?.requestId !== undefined) {
+                        await actions.grantAccess(
+                            plan.session_id,
+                            String(plan.params.requestId),
+                            Boolean(plan.params.allow),
+                        );
+                    }
+                    break;
+
+                case 'summarize_session':
+                    if (plan.session_id) {
+                        // The actual summary replaces the LLM's placeholder reply
+                        reply = await actions.summarizeSession(plan.session_id);
+                    }
+                    break;
+
+                case 'spawn_session':
+                    if (plan.params?.directory) {
+                        await actions.spawnSession(String(plan.params.directory));
+                    }
+                    break;
+
+                case 'none':
+                default:
+                    break;
+            }
+        } catch (err) {
+            console.error(`[Conductor] Action ${plan.action} failed:`, err);
+            reply = `Sorry, I ran into a problem: ${err instanceof Error ? err.message : String(err)}`;
+        }
+
+        db.appendConversation('user', text, plan.session_id);
+        db.appendConversation('conductor', reply, plan.session_id);
+        db.updateIdentitySeq(seq);
+
+        console.log(`[Conductor] Replying: "${reply.slice(0, 120)}${reply.length > 120 ? '...' : ''}"`);
+        await conductorSession.sendAgentMessage(reply);
     };
+
+    // ── Socket session ────────────────────────────────────────────────────────
 
     const conductorSession = new ConductorSession(
         serverUrl,
@@ -211,27 +216,28 @@ async function main(): Promise<void> {
         encryptionVariant,
         client,
         lastSeq,
-        handleUserMessage,
-        sessionMetadata,
-        sessionMetadataVersion,
+        (text) => handleUserMessage(text, lastSeq + 1),
+        conductorMetadata,
+        metadataVersion,
     );
 
     conductorSession.connect();
-    conductorSession.startPolling(3000); // Poll every 3s as fallback
+    conductorSession.startPolling(5000);
 
     console.log(`[Conductor] Ready. Session ID: ${sessionId}`);
     console.log(`[Conductor] Open the Happy app and look for the "Conductor" session.`);
 
-    // Keep process alive
-    process.on('SIGINT', () => {
+    // ── Graceful shutdown ─────────────────────────────────────────────────────
+
+    const shutdown = (): void => {
         console.log('\n[Conductor] Shutting down...');
         conductorSession.close();
+        db.close();
         process.exit(0);
-    });
-    process.on('SIGTERM', () => {
-        conductorSession.close();
-        process.exit(0);
-    });
+    };
+
+    process.on('SIGINT', shutdown);
+    process.on('SIGTERM', shutdown);
 }
 
 main().catch((err) => {

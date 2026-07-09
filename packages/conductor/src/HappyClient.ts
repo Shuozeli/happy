@@ -151,4 +151,24 @@ export class HappyClient {
             { timeout: 30000 },
         );
     }
+
+    // Calls an RPC method on a target session via the server HTTP endpoint.
+    // Requires POST /v1/sessions/:id/rpc/:method to exist on the Happy server.
+    // params is encrypted by the caller using the target session's key before calling.
+    async callSessionRpc(
+        sessionId: string,
+        method: string,
+        encryptionKey: Uint8Array,
+        encryptionVariant: 'legacy' | 'dataKey',
+        params: unknown = {},
+    ): Promise<unknown> {
+        const encryptedParams = encodeBase64(encrypt(encryptionKey, encryptionVariant, params));
+        const response = await axios.post<{ result: string }>(
+            `${this.serverUrl}/v1/sessions/${encodeURIComponent(sessionId)}/rpc/${encodeURIComponent(method)}`,
+            { params: encryptedParams },
+            { headers: this.headers, timeout: 15000 },
+        );
+        if (!response.data.result) return null;
+        return decrypt(encryptionKey, encryptionVariant, decodeBase64(response.data.result));
+    }
 }
