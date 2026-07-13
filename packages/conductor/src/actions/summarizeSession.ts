@@ -1,6 +1,7 @@
 import { decodeBase64, decrypt } from '../crypto.js';
 import type { Database } from '../db/Database.js';
 import type { HappyClient } from '../HappyClient.js';
+import { resolveBackend, type InferenceBackend } from '../vendorAuth.js';
 
 const SYSTEM_PROMPT =
     'You are summarizing a coding session for someone listening on their phone, hands-free. ' +
@@ -10,10 +11,6 @@ const SYSTEM_PROMPT =
 
 // How many new messages since last summary before we re-generate (avoid redundant AI calls).
 const SUMMARY_STALE_AFTER_MESSAGES = 20;
-
-type InferenceBackend =
-    | { vendor: 'anthropic'; token: string }
-    | { vendor: 'openai'; token: string };
 
 function extractText(body: unknown): string | null {
     if (!body || typeof body !== 'object') return null;
@@ -49,38 +46,10 @@ function extractText(body: unknown): string | null {
     return null;
 }
 
-async function resolveBackend(client: HappyClient): Promise<InferenceBackend | null> {
-    const anthropicData = await client.getVendorToken('anthropic');
-    const anthropicToken =
-        anthropicData &&
-        typeof anthropicData === 'object' &&
-        'oauth' in anthropicData &&
-        anthropicData.oauth &&
-        typeof anthropicData.oauth === 'object' &&
-        'token' in anthropicData.oauth &&
-        typeof (anthropicData.oauth as Record<string, unknown>).token === 'string'
-            ? (anthropicData.oauth as Record<string, unknown>).token as string
-            : null;
-    if (anthropicToken) return { vendor: 'anthropic', token: anthropicToken };
-
-    const openaiData = await client.getVendorToken('openai');
-    const openaiToken =
-        openaiData &&
-        typeof openaiData === 'object' &&
-        'oauth' in openaiData &&
-        openaiData.oauth &&
-        typeof openaiData.oauth === 'object' &&
-        'access_token' in openaiData.oauth &&
-        typeof (openaiData.oauth as Record<string, unknown>).access_token === 'string'
-            ? (openaiData.oauth as Record<string, unknown>).access_token as string
-            : null;
-    if (openaiToken) return { vendor: 'openai', token: openaiToken };
-
-    if (process.env.ANTHROPIC_API_KEY) {
-        return { vendor: 'anthropic', token: process.env.ANTHROPIC_API_KEY };
-    }
-
-    return null;
+function anthropicAuthHeader(token: string): Record<string, string> {
+    return token.startsWith('sk-ant-oat')
+        ? { Authorization: `Bearer ${token}` }
+        : { 'x-api-key': token };
 }
 
 async function callAI(backend: InferenceBackend, context: string): Promise<string> {
@@ -88,7 +57,7 @@ async function callAI(backend: InferenceBackend, context: string): Promise<strin
         const res = await fetch('https://api.anthropic.com/v1/messages', {
             method: 'POST',
             headers: {
-                Authorization: `Bearer ${backend.token}`,
+                ...anthropicAuthHeader(backend.token),
                 'Content-Type': 'application/json',
                 'anthropic-version': '2023-06-01',
             },

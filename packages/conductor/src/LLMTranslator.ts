@@ -1,6 +1,7 @@
 import { z } from 'zod';
 import type { HappyClient } from './HappyClient.js';
 import type { SessionRow, ConversationRow } from './db/Database.js';
+import { resolveBackend, type InferenceBackend } from './vendorAuth.js';
 
 // ── Schema ───────────────────────────────────────────────────────────────────
 
@@ -78,46 +79,17 @@ function buildUserPrompt(
     return `Active sessions:\n${sessionList}\n\nRecent conversation:\n${historyText}\n\nUser says: "${text}"`;
 }
 
-// ── Backend resolution (shared with summarizeSession) ────────────────────────
-
-type InferenceBackend =
-    | { vendor: 'anthropic'; token: string }
-    | { vendor: 'openai'; token: string };
-
-async function resolveBackend(client: HappyClient): Promise<InferenceBackend | null> {
-    const anthropicData = await client.getVendorToken('anthropic');
-    const anthropicToken =
-        anthropicData &&
-        typeof anthropicData === 'object' &&
-        'oauth' in anthropicData &&
-        anthropicData.oauth &&
-        typeof anthropicData.oauth === 'object' &&
-        'token' in anthropicData.oauth &&
-        typeof (anthropicData.oauth as Record<string, unknown>).token === 'string'
-            ? (anthropicData.oauth as Record<string, unknown>).token as string
-            : null;
-    if (anthropicToken) return { vendor: 'anthropic', token: anthropicToken };
-
-    const openaiData = await client.getVendorToken('openai');
-    const openaiToken =
-        openaiData &&
-        typeof openaiData === 'object' &&
-        'oauth' in openaiData &&
-        openaiData.oauth &&
-        typeof openaiData.oauth === 'object' &&
-        'access_token' in openaiData.oauth &&
-        typeof (openaiData.oauth as Record<string, unknown>).access_token === 'string'
-            ? (openaiData.oauth as Record<string, unknown>).access_token as string
-            : null;
-    if (openaiToken) return { vendor: 'openai', token: openaiToken };
-
-    if (process.env.ANTHROPIC_API_KEY) return { vendor: 'anthropic', token: process.env.ANTHROPIC_API_KEY };
-
-    return null;
-}
+// ── Backend resolution — delegated to vendorAuth.ts ──────────────────────────
 
 function stripJsonFences(text: string): string {
     return text.replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/i, '').trim();
+}
+
+function anthropicAuthHeader(token: string): Record<string, string> {
+    // API keys (sk-ant-api03-...) use x-api-key; OAuth tokens (sk-ant-oat01-...) use Authorization: Bearer
+    return token.startsWith('sk-ant-oat')
+        ? { Authorization: `Bearer ${token}` }
+        : { 'x-api-key': token };
 }
 
 async function callAI(backend: InferenceBackend, system: string, user: string): Promise<string> {
@@ -125,7 +97,7 @@ async function callAI(backend: InferenceBackend, system: string, user: string): 
         const res = await fetch('https://api.anthropic.com/v1/messages', {
             method: 'POST',
             headers: {
-                Authorization: `Bearer ${backend.token}`,
+                ...anthropicAuthHeader(backend.token),
                 'Content-Type': 'application/json',
                 'anthropic-version': '2023-06-01',
             },
@@ -210,7 +182,11 @@ export class LLMTranslator {
             return result.data;
         } catch (err) {
             console.error('[LLMTranslator] Failed:', err);
-            this.backend = undefined; // Force re-resolve next call
+            // On auth error, force full re-resolve (may pick up ANTHROPIC_API_KEY or refreshed token).
+            // On other errors (network, parse), keep the backend to avoid hammering the auth endpoint.
+            if (err instanceof Error && (err.message.includes('401') || err.message.includes('403'))) {
+                this.backend = undefined;
+            }
             return FALLBACK_PLAN;
         }
     }

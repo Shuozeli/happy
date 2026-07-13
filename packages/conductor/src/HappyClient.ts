@@ -144,6 +144,16 @@ export class HappyClient {
         }
     }
 
+    async registerVendorToken(vendor: 'anthropic' | 'openai' | 'gemini', tokenJson: string): Promise<void> {
+        try {
+            await axios.post(
+                `${this.serverUrl}/v1/connect/${vendor}/register`,
+                { token: tokenJson },
+                { headers: this.headers, timeout: 5000 },
+            );
+        } catch { /* non-fatal — token still usable even if store update fails */ }
+    }
+
     async spawnSessionViaDaemon(directory: string, daemonPort: number): Promise<void> {
         await axios.post(
             `http://127.0.0.1:${daemonPort}/spawn-session`,
