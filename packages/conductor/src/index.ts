@@ -227,10 +227,22 @@ async function main(): Promise<void> {
     console.log(`[Conductor] Ready. Session ID: ${sessionId}`);
     console.log(`[Conductor] Open the Happy app and look for the "Conductor" session.`);
 
+    // ── Background session polling ────────────────────────────────────────────
+
+    // Do an initial fetch so the DB is populated before any user message arrives.
+    actions.fetchSessions().catch((err) => console.warn('[Conductor] Initial fetchSessions failed:', err));
+
+    const POLL_INTERVAL_MS = 30_000;
+    const pollTimer = setInterval(
+        () => actions.fetchSessions().catch((err) => console.warn('[Conductor] Background fetchSessions failed:', err)),
+        POLL_INTERVAL_MS,
+    );
+
     // ── Graceful shutdown ─────────────────────────────────────────────────────
 
     const shutdown = (): void => {
         console.log('\n[Conductor] Shutting down...');
+        clearInterval(pollTimer);
         conductorSession.close();
         db.close();
         process.exit(0);
