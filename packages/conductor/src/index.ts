@@ -159,9 +159,7 @@ async function main(): Promise<void> {
                         reply = 'You have no active sessions right now.';
                     } else {
                         const names = active.map((s, i) => {
-                            const label = s.summary_text
-                                ? s.summary_text.split('.')[0].slice(0, 80)
-                                : s.directory.replace(process.env.HOME ?? '/root', '~');
+                            const label = s.directory.replace(process.env.HOME ?? '/root', '~');
                             return `${i + 1}. ${label}`;
                         }).join('; ');
                         reply = `You have ${active.length} active session${active.length > 1 ? 's' : ''}: ${names}.`;

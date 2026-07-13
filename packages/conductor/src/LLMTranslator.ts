@@ -44,19 +44,21 @@ Reply with ONLY a JSON object — no prose, no markdown fences. Schema:
 }
 
 Action rules:
-- "fetch_sessions": refresh the session list. session_id=null, params=null.
+- "fetch_sessions": refresh and list active sessions. Use ONLY when the user explicitly asks to list or see their sessions. session_id=null, params=null.
 - "send_to_session": send a message to a session. params={"message":"<text>"}.
 - "interrupt": immediately stop a session's current work. session_id required, params=null.
 - "grant_access": approve or deny a permission request. params={"requestId":"<id>","allow":true|false}.
-- "summarize_session": summarize what a session is doing. session_id required, params=null. Set reply to "Let me check that session for you." — the real summary replaces it.
+- "summarize_session": summarize what a session is doing. Use ANY TIME the user asks to summarize, describe, or explain what a session is doing — even if you already see a summary in the context. session_id required, params=null. Set reply to "Let me check that session for you." — the real summary replaces it.
 - "spawn_session": start a new session. session_id=null, params={"directory":"<path>"}.
 - "none": for greetings, thanks, or anything that needs no action.
 
 IMPORTANT:
 - Never invent a session_id. Only use IDs from the active sessions list provided.
 - If the user refers to a session by name or directory, match it to the closest entry in the list.
+- If the user says "the first one", "session 1", "that one", etc., match by position in the active sessions list.
 - If you cannot confidently identify which session they mean, ask for clarification via "none".
-- Keep "reply" conversational and brief — it will be spoken aloud.`;
+- Keep "reply" conversational and brief — it will be spoken aloud.
+- NEVER use the summary text from the sessions list as your "reply" — always follow the action rules above.`;
 }
 
 function buildUserPrompt(
@@ -68,8 +70,7 @@ function buildUserPrompt(
         ? 'No active sessions.'
         : sessions.map((s, i) => {
             const dir = s.directory.replace(process.env.HOME ?? '/root', '~');
-            const summary = s.summary_text ? ` — ${s.summary_text}` : '';
-            return `${i + 1}. id=${s.id} dir=${dir} type=${s.agent_type} state=${s.lifecycle_state}${summary}`;
+            return `${i + 1}. id=${s.id} dir=${dir} type=${s.agent_type} state=${s.lifecycle_state}`;
         }).join('\n');
 
     const historyText = history.length === 0
