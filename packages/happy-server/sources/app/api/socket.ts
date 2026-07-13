@@ -15,6 +15,13 @@ import { machineUpdateHandler } from "./socket/machineUpdateHandler";
 import { artifactUpdateHandler } from "./socket/artifactUpdateHandler";
 import { accessKeyHandler } from "./socket/accessKeyHandler";
 
+let _io: Server | null = null;
+
+export function getIo(): Server {
+    if (!_io) throw new Error('Socket.IO server not yet initialized');
+    return _io;
+}
+
 export function startSocket(app: Fastify) {
     const io = new Server(app.server, {
         cors: {
@@ -45,6 +52,8 @@ export function startSocket(app: Fastify) {
         //     maxDisconnectionDuration: 2 * 60 * 1000,
         // },
     });
+
+    _io = io;
 
     // Multi-process support: attach Redis streams adapter when REDIS_URL is set
     if (process.env.REDIS_URL) {

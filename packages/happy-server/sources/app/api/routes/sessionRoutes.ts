@@ -7,6 +7,7 @@ import { log } from "@/utils/log";
 import { randomKeyNaked } from "@/utils/randomKeyNaked";
 import { allocateUserSeq } from "@/storage/seq";
 import { sessionDelete } from "@/app/session/sessionDelete";
+import { getIo } from "@/app/api/socket";
 
 export function sessionRoutes(app: Fastify) {
 
@@ -405,5 +406,44 @@ export function sessionRoutes(app: Fastify) {
         }
 
         return reply.send({ success: true });
+    });
+
+    // RPC call relay — forward an HTTP call to a daemon registered via rpc-register.
+    // Method is prefixed with the sessionId to scope it: rpc:${userId}:${sessionId}:${method}.
+    app.post('/v1/sessions/:sessionId/rpc/:method', {
+        schema: {
+            params: z.object({
+                sessionId: z.string(),
+                method: z.string()
+            }),
+            body: z.object({
+                params: z.unknown().optional()
+            }).optional()
+        },
+        preHandler: app.authenticate
+    }, async (request, reply) => {
+        const userId = request.userId;
+        const { sessionId, method } = request.params;
+
+        const io = getIo();
+        const fullMethod = `${sessionId}:${method}`;
+        const room = `rpc:${userId}:${fullMethod}`;
+
+        const sockets = await io.in(room).timeout(3000).fetchSockets().catch(() => []);
+        if (sockets.length === 0) {
+            return reply.code(503).send({ error: 'RPC method not available' });
+        }
+
+        const target = sockets[0];
+        try {
+            const response = await target.timeout(30_000).emitWithAck('rpc-request', {
+                method: fullMethod,
+                params: request.body?.params
+            });
+            return reply.send({ ok: true, result: response });
+        } catch (err) {
+            const msg = err instanceof Error ? err.message : 'RPC call failed';
+            return reply.code(504).send({ ok: false, error: msg });
+        }
     });
 }
