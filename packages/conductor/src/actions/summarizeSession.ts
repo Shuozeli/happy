@@ -9,8 +9,6 @@ const SYSTEM_PROMPT =
     'Plain conversational English. Focus on: what the agent is working on, what progress has been made, ' +
     "and what it's doing right now. If there's nothing meaningful to report, say so briefly.";
 
-// How many new messages since last summary before we re-generate (avoid redundant AI calls).
-const SUMMARY_STALE_AFTER_MESSAGES = 20;
 
 function extractText(body: unknown): string | null {
     if (!body || typeof body !== 'object') return null;
@@ -103,14 +101,6 @@ export async function summarizeSession(
 ): Promise<string> {
     const session = db.getSession(sessionId);
     if (!session) return `I don't have session ${sessionId} in my registry. Try asking me to fetch sessions first.`;
-
-    // Return cached summary if the session hasn't moved much since we last generated one.
-    if (session.summary_text) {
-        const staleness = session.seq - (session.seq ?? 0);
-        if (staleness < SUMMARY_STALE_AFTER_MESSAGES) {
-            return session.summary_text;
-        }
-    }
 
     if (cachedBackend === undefined) {
         cachedBackend = await resolveBackend(client);
