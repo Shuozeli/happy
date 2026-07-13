@@ -152,9 +152,22 @@ async function main(): Promise<void> {
 
         try {
             switch (plan.action) {
-                case 'fetch_sessions':
-                    // Already done above; just confirm
+                case 'fetch_sessions': {
+                    // Already fetched above — build the reply from actual DB state.
+                    const active = db.getAllActiveSessions();
+                    if (active.length === 0) {
+                        reply = 'You have no active sessions right now.';
+                    } else {
+                        const names = active.map((s, i) => {
+                            const label = s.summary_text
+                                ? s.summary_text.split('.')[0].slice(0, 80)
+                                : s.directory.replace(process.env.HOME ?? '/root', '~');
+                            return `${i + 1}. ${label}`;
+                        }).join('; ');
+                        reply = `You have ${active.length} active session${active.length > 1 ? 's' : ''}: ${names}.`;
+                    }
                     break;
+                }
 
                 case 'send_to_session':
                     if (plan.session_id && plan.params?.message) {
