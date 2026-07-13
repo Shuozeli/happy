@@ -440,7 +440,7 @@ export function sessionRoutes(app: Fastify) {
                 method: fullMethod,
                 params: request.body?.params
             });
-            return reply.send({ ok: true, result: response });
+            return reply.send(response);
         } catch (err) {
             const msg = err instanceof Error ? err.message : 'RPC call failed';
             return reply.code(504).send({ ok: false, error: msg });
