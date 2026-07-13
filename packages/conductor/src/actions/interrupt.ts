@@ -2,8 +2,10 @@ import { decodeBase64 } from '../crypto.js';
 import type { Database } from '../db/Database.js';
 import type { HappyClient } from '../HappyClient.js';
 
-// Calls the `abort` RPC on the target session, stopping its current execution immediately.
-// Requires POST /v1/sessions/:id/rpc/:method on the Happy server (see DESIGN.md OQ-2).
+const INTERRUPT_MESSAGE =
+    'Please stop what you are doing right now and wait for further instructions.';
+
+// Sends a user message asking the agent to stop its current work.
 export async function interrupt(
     db: Database,
     client: HappyClient,
@@ -15,6 +17,11 @@ export async function interrupt(
     const encryptionKey = decodeBase64(session.encryption_key);
     const encryptionVariant = session.encryption_variant as 'legacy' | 'dataKey';
 
-    await client.callSessionRpc(sessionId, 'abort', encryptionKey, encryptionVariant, {});
-    db.logAction('interrupt', sessionId, { rpcMethod: 'abort' }, 'ok');
+    const userMessage = {
+        role: 'user',
+        content: { type: 'text', text: INTERRUPT_MESSAGE },
+    };
+
+    await client.sendMessages(sessionId, encryptionKey, encryptionVariant, [userMessage]);
+    db.logAction('interrupt', sessionId, { message: INTERRUPT_MESSAGE }, 'ok');
 }

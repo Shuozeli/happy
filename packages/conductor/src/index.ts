@@ -176,7 +176,10 @@ async function main(): Promise<void> {
                     break;
 
                 case 'interrupt':
-                    if (plan.session_id) await actions.interrupt(plan.session_id);
+                    if (plan.session_id) {
+                        await actions.interrupt(plan.session_id);
+                        reply = 'Done. I sent a stop message to that session.';
+                    }
                     break;
 
                 case 'grant_access':
