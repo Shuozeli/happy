@@ -11,7 +11,7 @@ import {
 } from './config.js';
 import { encodeBase64, decodeBase64, deriveContentKeyPair } from './crypto.js';
 import { HappyClient } from './HappyClient.js';
-import { ConductorSession } from './ConductorSession.js';
+import { ConductorSession, type RpcHandler } from './ConductorSession.js';
 import { Database } from './db/Database.js';
 import { createActions } from './actions/index.js';
 import { LLMTranslator } from './LLMTranslator.js';
@@ -206,6 +206,32 @@ async function main(): Promise<void> {
         await conductorSession.sendAgentMessage(reply);
     };
 
+    // ── RPC handler — lets HTTP callers invoke actions without the LLM router ──
+
+    const handleRpc: RpcHandler = async (method, params) => {
+        const p = (params && typeof params === 'object' ? params : {}) as Record<string, unknown>;
+        switch (method) {
+            case 'fetch_sessions':
+                await actions.fetchSessions();
+                return db.getAllActiveSessions();
+            case 'send_to_session':
+                await actions.sendToSession(String(p.sessionId), String(p.message));
+                return null;
+            case 'interrupt':
+                await actions.interrupt(String(p.sessionId));
+                return null;
+            case 'summarize_session':
+                return actions.summarizeSession(String(p.sessionId));
+            case 'spawn_session':
+                return actions.spawnSession(String(p.directory));
+            case 'grant_access':
+                await actions.grantAccess(String(p.sessionId), String(p.requestId), Boolean(p.allow));
+                return null;
+            default:
+                throw new Error(`Unknown RPC method: ${method}`);
+        }
+    };
+
     // ── Socket session ────────────────────────────────────────────────────────
 
     const conductorSession = new ConductorSession(
@@ -219,6 +245,7 @@ async function main(): Promise<void> {
         (text) => handleUserMessage(text, lastSeq + 1),
         conductorMetadata,
         metadataVersion,
+        handleRpc,
     );
 
     conductorSession.connect();

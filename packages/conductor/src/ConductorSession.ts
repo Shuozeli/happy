@@ -3,8 +3,12 @@ import { decodeBase64, decrypt, encodeBase64, encrypt } from './crypto.js';
 import { HappyClient } from './HappyClient.js';
 import type { SessionMetadata, UserMessage } from './types.js';
 
+type RpcRequestData = { method: string; params: unknown };
+type RpcResponse = { ok: true; result: unknown } | { ok: false; error: string };
+
 type ServerToClientEvents = {
     update: (data: { body: { t: string; sid?: string; message?: { seq: number; content: { t: string; c: string } } } }) => void;
+    'rpc-request': (data: RpcRequestData, callback: (res: RpcResponse) => void) => void;
     auth: (data: { success: boolean }) => void;
     error: (data: { message: string }) => void;
 };
@@ -12,7 +16,14 @@ type ServerToClientEvents = {
 type ClientToServerEvents = {
     'session-alive': (data: { sid: string; time: number; thinking: boolean; mode: string }) => void;
     'update-metadata': (data: { sid: string; expectedVersion: number; metadata: string }, cb: (res: unknown) => void) => void;
+    'rpc-register': (data: { method: string }) => void;
+    'rpc-unregister': (data: { method: string }) => void;
 };
+
+// Methods the conductor exposes to HTTP callers via the RPC room system.
+const RPC_METHODS = ['fetch_sessions', 'send_to_session', 'interrupt', 'summarize_session', 'spawn_session', 'grant_access'] as const;
+
+export type RpcHandler = (method: string, params: unknown) => Promise<unknown>;
 
 export class ConductorSession {
     private socket: Socket<ServerToClientEvents, ClientToServerEvents> | null = null;
@@ -30,6 +41,7 @@ export class ConductorSession {
         private readonly onUserMessage: (text: string) => Promise<void>,
         private readonly metadata?: SessionMetadata,
         private metadataVersion?: number,
+        private readonly onRpcRequest?: RpcHandler,
     ) {}
 
     connect(): void {
@@ -56,7 +68,30 @@ export class ConductorSession {
             this.pushMetadata().catch(() => {});
             // Fetch any messages missed while disconnected
             this.pollMessages().catch(() => {});
+            // Register RPC methods so HTTP callers can invoke conductor actions directly.
+            if (this.onRpcRequest) {
+                for (const m of RPC_METHODS) {
+                    this.socket!.emit('rpc-register', { method: `${this.sessionId}:${m}` });
+                }
+            }
         });
+
+        // Dispatch incoming RPC requests (from POST /v1/sessions/:id/rpc/:method) to handler.
+        if (this.onRpcRequest) {
+            const handler = this.onRpcRequest;
+            const sessionPrefix = `${this.sessionId}:`;
+            this.socket.on('rpc-request', async (data, callback) => {
+                const baseMethod = data.method.startsWith(sessionPrefix)
+                    ? data.method.slice(sessionPrefix.length)
+                    : data.method;
+                try {
+                    const result = await handler(baseMethod, data.params);
+                    callback({ ok: true, result: result ?? null });
+                } catch (err) {
+                    callback({ ok: false, error: err instanceof Error ? err.message : String(err) });
+                }
+            });
+        }
 
         this.socket.on('update', (data) => {
             if (data.body?.t !== 'new-message' || !data.body.message) return;
